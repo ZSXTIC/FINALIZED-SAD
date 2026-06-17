@@ -2517,21 +2517,28 @@ async function handlePayment(form) {
     return;
   }
   
+  // Capture the order data BEFORE creating/nulling it
+  let targetOrder;
   if (orderId === "pending") {
+    targetOrder = state.ui.pendingOrderPayload;
+  } else {
+    targetOrder = getOrderById(orderId);
+  }
+
+  // Start processing animation
+  state.ui.paymentState = 'processing';
+  state.ui.paymentSuccessData = {
+    title: targetOrder?.productName || "Order Payment",
+    totalPrice: Number(targetOrder?.totalPrice) || 0
+  };
+  render();
+  await new Promise(resolve => setTimeout(resolve, 1500));
+
+  if (form.dataset.orderId === "pending") {
     const newOrder = await service.createOrder(state.ui.pendingOrderPayload);
     orderId = newOrder.id;
     state.ui.pendingOrderPayload = null;
   }
-
-  // Start processing animation
-  const targetOrder = orderId === "pending" ? state.ui.pendingOrderPayload : getOrderById(orderId);
-  state.ui.paymentState = 'processing';
-  state.ui.paymentSuccessData = {
-    title: targetOrder?.productName || "Order Payment",
-    totalPrice: targetOrder?.totalPrice || 0
-  };
-  render();
-  await new Promise(resolve => setTimeout(resolve, 1500));
 
   await service.payOrder({ orderId, cardNumber });
   
@@ -2867,36 +2874,54 @@ async function handleClick(event) {
       case "select-global-chat-order":
         state.ui.globalChatActiveOrderId = actionTarget.dataset.orderId;
         
-        const badge = actionTarget.querySelector('.unread-badge');
-        if (badge) badge.remove();
-        
+        // Mark messages as seen immediately
         const totalMsgs = state.ui.allOrderMessages?.filter(m => m.orderId === state.ui.globalChatActiveOrderId).length || 0;
         localStorage.setItem('chat_seen_' + state.ui.globalChatActiveOrderId, totalMsgs.toString());
         
-        const globalBadge = document.querySelector('.global-unread-badge');
-        if (globalBadge) {
-          // Re-render header to update the global count accurately
-          const headerContainer = document.querySelector('.site-header');
-          if (headerContainer && headerContainer.parentElement) {
-            // Because renderHeader returns the full <header>, we need to replace outerHTML
-            headerContainer.outerHTML = renderHeader();
-          }
+        // Re-render header to update global unread badge
+        const headerContainer = document.querySelector('.site-header');
+        if (headerContainer && headerContainer.parentElement) {
+          headerContainer.outerHTML = renderHeader();
         }
-        
-        document.querySelectorAll('.chat-list-item').forEach(el => {
-          if (el.dataset.orderId === state.ui.globalChatActiveOrderId) {
-            el.classList.add('is-active');
-            el.style.background = 'var(--surface-hover)';
-            el.style.borderLeft = '3px solid var(--accent)';
-          } else {
-            el.classList.remove('is-active');
-            el.style.background = 'transparent';
-            el.style.borderLeft = '3px solid transparent';
-          }
-        });
 
         state.ui.orderChatMessages = null;
         const rightPane = document.getElementById('chat-main-container');
+        
+        // Re-render sidebar to clear per-order unread badge
+        const chatSidebar = document.querySelector('.chat-sidebar .chat-list');
+        if (chatSidebar) {
+          const session = state.sessionUser;
+          let chatOrders = [];
+          if (state.data && state.data.orders) {
+            chatOrders = session.role === "admin" ? state.data.orders : state.data.orders.filter(o => o.userId === session.id);
+          }
+          chatOrders.sort((a, b) => new Date(b.updatedAt || b.createdAt) - new Date(a.updatedAt || a.createdAt));
+          const activeOrderId = state.ui.globalChatActiveOrderId;
+          chatSidebar.innerHTML = chatOrders.length === 0 ? '<p class="muted-copy" style="padding: 1rem; text-align: center;">No orders found.</p>' :
+            chatOrders.map(o => {
+              const oMsgs = state.ui.allOrderMessages?.filter(m => m.orderId === o.id) || [];
+              const seenCount = parseInt(localStorage.getItem('chat_seen_' + o.id) || '0', 10);
+              const unreadCount = Math.max(0, oMsgs.length - seenCount);
+              const lastMsg = oMsgs.length > 0 ? oMsgs[oMsgs.length - 1] : null;
+              let senderText = session.role === "admin" && state.data.users ? (state.data.users.find(u => u.id === (o.userId || o.user_id))?.fullName || "Customer") : "Studio Team";
+              if (lastMsg) {
+                senderText = lastMsg.senderName;
+                if (lastMsg.userId === session.id) senderText = "Me";
+              }
+              return `
+              <div class="chat-list-item ${activeOrderId === o.id ? 'is-active' : ''}" data-action="select-global-chat-order" data-order-id="${o.id}" style="padding: 1rem; border-bottom: 1px solid var(--line); cursor: pointer; display: flex; flex-direction: column; gap: 0.25rem; background: ${activeOrderId === o.id ? 'var(--surface-hover)' : 'transparent'}; border-left: ${activeOrderId === o.id ? '3px solid var(--accent)' : '3px solid transparent'}; transition: all 0.2s;">
+                <div style="display: flex; justify-content: space-between; align-items: center;">
+                  <strong style="font-size: 0.95rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 70%;">${escapeHtml(o.orderNumber || o.order_number)}</strong>
+                  ${unreadCount > 0 ? `<div class="unread-badge" style="background: var(--danger); color: white; font-size: 0.7rem; font-weight: bold; border-radius: 999px; min-width: 18px; height: 18px; display: flex; align-items: center; justify-content: center; padding: 0 4px; line-height: 1;">${unreadCount > 9 ? '9+' : unreadCount}</div>` : ''}
+                </div>
+                <div style="display: flex; justify-content: space-between; align-items: baseline; margin-top: 2px;">
+                  <span style="font-size: 0.85rem; color: var(--text-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 60%;">${escapeHtml(o.productName || o.product_name || "Custom Order")}</span>
+                  <span style="font-size: 0.75rem; color: var(--text-3); font-weight: 500;">${escapeHtml(senderText)}</span>
+                </div>
+              </div>
+            `}).join("");
+        }
+
         if (rightPane) {
           rightPane.innerHTML = renderGlobalChatRightPane();
         }
@@ -3254,6 +3279,81 @@ async function boot() {
     state.isLoading = false;
     render();
   }
+
+  // Real-time message & order polling
+  setInterval(async () => {
+    if (!state.sessionUser) return;
+    try {
+      const oldMsgCount = state.ui.allOrderMessages?.length || 0;
+      const oldOrderCount = state.data?.orders?.length || 0;
+      
+      const payload = await service.fetchBootstrap(state.sessionUser);
+      const msgs = await service.fetchAllOrderMessages();
+      
+      if (!payload || !msgs) return;
+      
+      if (msgs.length > oldMsgCount || payload.orders.length > oldOrderCount) {
+        state.data = payload;
+        state.ui.allOrderMessages = msgs;
+        
+        // If chat is open, update the active chat pane
+        if (state.ui.globalChatOpen && state.ui.globalChatActiveOrderId) {
+          state.ui.orderChatMessages = msgs.filter(m => m.orderId === state.ui.globalChatActiveOrderId);
+          
+          // Auto-mark as seen if we are actively looking at it
+          localStorage.setItem('chat_seen_' + state.ui.globalChatActiveOrderId, state.ui.orderChatMessages.length.toString());
+          
+          const rightPane = document.getElementById('chat-main-container');
+          if (rightPane) {
+            rightPane.innerHTML = renderGlobalChatRightPane();
+            const msgsContainer = rightPane.querySelector('.messages-container');
+            if (msgsContainer) msgsContainer.scrollTop = msgsContainer.scrollHeight;
+          }
+        }
+        
+        // Re-render header to update the global notification badge
+        const headerContainer = document.querySelector('.site-header');
+        if (headerContainer && headerContainer.parentElement) {
+          headerContainer.outerHTML = renderHeader();
+        }
+        
+        // Re-render chat sidebar if modal is open
+        const chatSidebar = document.querySelector('.chat-sidebar .chat-list');
+        if (chatSidebar) {
+          const session = state.sessionUser;
+          let chatOrders = [];
+          if (state.data && state.data.orders) {
+            chatOrders = session.role === "admin" ? state.data.orders : state.data.orders.filter(o => o.userId === session.id);
+          }
+          chatOrders.sort((a, b) => new Date(b.updatedAt || b.createdAt) - new Date(a.updatedAt || a.createdAt));
+          const activeOrderId = state.ui.globalChatActiveOrderId;
+          chatSidebar.innerHTML = chatOrders.length === 0 ? '<p class="muted-copy" style="padding: 1rem; text-align: center;">No orders found.</p>' :
+            chatOrders.map(o => {
+              const oMsgs = state.ui.allOrderMessages?.filter(m => m.orderId === o.id) || [];
+              const seenCount = parseInt(localStorage.getItem('chat_seen_' + o.id) || '0', 10);
+              const unreadCount = Math.max(0, oMsgs.length - seenCount);
+              const lastMsg = oMsgs.length > 0 ? oMsgs[oMsgs.length - 1] : null;
+              let senderText = session.role === "admin" && state.data.users ? (state.data.users.find(u => u.id === (o.userId || o.user_id))?.fullName || "Customer") : "Studio Team";
+              if (lastMsg) {
+                senderText = lastMsg.senderName;
+                if (lastMsg.userId === session.id) senderText = "Me";
+              }
+              return `
+              <div class="chat-list-item ${activeOrderId === o.id ? 'is-active' : ''}" data-action="select-global-chat-order" data-order-id="${o.id}" style="padding: 1rem; border-bottom: 1px solid var(--line); cursor: pointer; display: flex; flex-direction: column; gap: 0.25rem; background: ${activeOrderId === o.id ? 'var(--surface-hover)' : 'transparent'}; border-left: ${activeOrderId === o.id ? '3px solid var(--accent)' : '3px solid transparent'}; transition: all 0.2s;">
+                <div style="display: flex; justify-content: space-between; align-items: center;">
+                  <strong style="font-size: 0.95rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 70%;">${escapeHtml(o.orderNumber || o.order_number)}</strong>
+                  ${unreadCount > 0 ? `<div class="unread-badge" style="background: var(--danger); color: white; font-size: 0.7rem; font-weight: bold; border-radius: 999px; min-width: 18px; height: 18px; display: flex; align-items: center; justify-content: center; padding: 0 4px; line-height: 1;">${unreadCount > 9 ? '9+' : unreadCount}</div>` : ''}
+                </div>
+                <div style="display: flex; justify-content: space-between; align-items: baseline; margin-top: 2px;">
+                  <span style="font-size: 0.85rem; color: var(--text-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 60%;">${escapeHtml(o.productName || o.product_name || "Custom Order")}</span>
+                  <span style="font-size: 0.75rem; color: var(--text-3); font-weight: 500;">${escapeHtml(senderText)}</span>
+                </div>
+              </div>
+            `}).join("");
+        }
+      }
+    } catch (err) {}
+  }, 3000); // Check every 3 seconds
 }
 
 root.addEventListener("submit", handleSubmit);

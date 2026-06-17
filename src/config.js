@@ -11,7 +11,7 @@ const APP_CONFIG = {
     password: "88888888"
   },
   demoUser: {
-    email: "user@infinitee.studio",
+    email: "user2@infinitee.studio",
     password: "User@123"
   }
 };
